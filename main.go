@@ -109,7 +109,9 @@ func startWatcher(ctx context.Context) error {
 
 	defer cancel()
 
-	if err := startCloak(cctx); err != nil {
+	var clean func()
+
+	if clean, err = startCloak(cctx); err != nil {
 		return err
 	}
 
@@ -120,9 +122,13 @@ func startWatcher(ctx context.Context) error {
 			if event.Op.Has(fsnotify.Write) {
 				time.Sleep(time.Second)
 				cancel()
+				clean()
+
+				time.Sleep(time.Second * 2)
+
 				cctx, cancel = context.WithCancel(ctx)
 
-				if err := startCloak(cctx); err != nil {
+				if clean, err = startCloak(cctx); err != nil {
 					return err
 				}
 			}
@@ -132,45 +138,60 @@ func startWatcher(ctx context.Context) error {
 	}
 }
 
-func startCloak(ctx context.Context) error {
+func startCloak(ctx context.Context) (func(), error) {
 	config, err := prepareConfig()
 
 	if err != nil {
-		return err
+		return nil, err
 	}
+
+	var list []func()
 
 	for k, c := range config.Clients {
 		fName := fmt.Sprintf(".config-%s.json", k)
 		logFName := fmt.Sprintf(".log-%s.log", k)
 
 		if err := os.WriteFile(fName, []byte(c.Config), 0666); err != nil {
-			return err
+			return nil, err
 		}
 
 		file, err := os.Create(logFName)
 
 		if err != nil {
-			return err
+			return nil, err
 		}
-
-		go func() {
-			<-ctx.Done()
-			file.Close()
-		}()
 
 		cmd := exec.CommandContext(ctx, getCloak(), "-c", fName, "-s", c.Server, "-p", strconv.Itoa(c.Port), "-l", strconv.Itoa(c.Listen))
 
+		// cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Stdout = file
 		cmd.Stderr = file
 
+		list = append(list, func() {
+			fmt.Println("killing ck-client")
+			cmd.Process.Kill()
+			file.Close()
+		})
+
 		if err := cmd.Start(); err != nil {
-			return err
+			return nil, err
 		}
 
 		fmt.Printf("Started config %s\n", fName)
 	}
 
-	return nil
+	go func() {
+		<-ctx.Done()
+		for _, l := range list {
+			l()
+		}
+	}()
+
+	return func() {
+		for _, l := range list {
+			l()
+		}
+	}, nil
 }
 
 func prepareConfig() (*Config, error) {
