@@ -138,7 +138,10 @@ func startWatcher(ctx context.Context) error {
 			if event.Op.Has(fsnotify.Write) {
 				time.Sleep(time.Second)
 				cancel()
-				clean()
+
+				if clean != nil {
+					clean()
+				}
 
 				time.Sleep(time.Second * 2)
 
