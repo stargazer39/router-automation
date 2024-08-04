@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/user"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -28,10 +30,10 @@ type Config struct {
 }
 
 type ClientConfig struct {
-	Server string `yaml: "server"`
-	Port   int    `yaml: "port"`
-	Listen int    `yaml: "listen"`
-	Config string `yaml: "config"`
+	Server string `yaml:"server"`
+	Port   int    `yaml:"port"`
+	Listen int    `yaml:"listen"`
+	Config string `yaml:"config"`
 }
 
 func main() {
@@ -92,7 +94,18 @@ func installCloak() error {
 }
 
 func startWatcher(ctx context.Context) error {
+	usr, err := user.Current()
+
+	if err != nil {
+		return err
+	}
+
+	configRoot := filepath.Join(usr.HomeDir, ".config", "cloak")
+
 	fmt.Println("Starting cloak")
+
+	fmt.Println(configRoot)
+	os.MkdirAll(configRoot, 0667)
 	watcher, err := fsnotify.NewWatcher()
 
 	if err != nil {
@@ -101,7 +114,10 @@ func startWatcher(ctx context.Context) error {
 
 	defer watcher.Close()
 
-	if err := watcher.Add("./config.yml"); err != nil {
+	configFile := filepath.Join(configRoot, "config.yml")
+
+	fmt.Println(configFile)
+	if err := watcher.Add(configFile); err != nil {
 		return err
 	}
 
@@ -111,7 +127,7 @@ func startWatcher(ctx context.Context) error {
 
 	var clean func()
 
-	if clean, err = startCloak(cctx); err != nil {
+	if clean, err = startCloak(cctx, configRoot); err != nil {
 		return err
 	}
 
@@ -128,7 +144,7 @@ func startWatcher(ctx context.Context) error {
 
 				cctx, cancel = context.WithCancel(ctx)
 
-				if clean, err = startCloak(cctx); err != nil {
+				if clean, err = startCloak(cctx, configRoot); err != nil {
 					return err
 				}
 			}
@@ -138,7 +154,7 @@ func startWatcher(ctx context.Context) error {
 	}
 }
 
-func startCloak(ctx context.Context) (func(), error) {
+func startCloak(ctx context.Context, configRoot string) (func(), error) {
 	config, err := prepareConfig()
 
 	if err != nil {
@@ -148,8 +164,8 @@ func startCloak(ctx context.Context) (func(), error) {
 	var list []func()
 
 	for k, c := range config.Clients {
-		fName := fmt.Sprintf(".config-%s.json", k)
-		logFName := fmt.Sprintf(".log-%s.log", k)
+		fName := filepath.Join(configRoot, fmt.Sprintf(".config-%s.json", k))
+		logFName := filepath.Join(configRoot, fmt.Sprintf(".log-%s.log", k))
 
 		if err := os.WriteFile(fName, []byte(c.Config), 0666); err != nil {
 			return nil, err
