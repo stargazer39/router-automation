@@ -1,0 +1,234 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/exec"
+	"runtime"
+	"time"
+
+	"strconv"
+
+	"github.com/fsnotify/fsnotify"
+	"gopkg.in/yaml.v3"
+)
+
+const (
+	uriX8664        = "https://github.com/cbeuw/Cloak/releases/download/v2.9.0/ck-client-linux-amd64-v2.9.0"
+	uriArm64        = "https://github.com/cbeuw/Cloak/releases/download/v2.9.0/ck-client-linux-arm64-v2.9.0"
+	cloakSystemPath = "/usr/bin/ck-client"
+)
+
+type Config struct {
+	Clients map[string]ClientConfig
+}
+
+type ClientConfig struct {
+	Server string `yaml: "server"`
+	Port   int    `yaml: "port"`
+	Listen int    `yaml: "listen"`
+	Config string `yaml: "config"`
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	defer cancel()
+
+	if !checkCloak() {
+		dieOnError("Cloak install failed.", installCloak())
+	}
+
+	dieOnError("starting config file watcher failed.", startWatcher(ctx))
+
+}
+
+func checkCloak() bool {
+	_, err := exec.LookPath("ck-client")
+
+	_, staterr := os.Stat(cloakSystemPath)
+
+	return err == nil || !errors.Is(staterr, os.ErrNotExist)
+}
+
+func getCloak() string {
+	str, _ := exec.LookPath("ck-client")
+	if len(str) == 0 {
+		return cloakSystemPath
+	}
+
+	return str
+}
+
+func installCloak() error {
+	arch := runtime.GOARCH
+	var cloakURI string
+
+	fmt.Printf("Installing Cloak for %s\n", arch)
+
+	switch arch {
+	case "amd64":
+		cloakURI = uriX8664
+	case "arm64":
+		cloakURI = uriArm64
+	default:
+		fmt.Printf("Unsupported architecture: %s\n", arch)
+		return fmt.Errorf("unsupported arch")
+	}
+
+	err := downloadFile(cloakSystemPath, cloakURI)
+	if err != nil {
+		fmt.Printf("Failed to download Cloak: %v\n", err)
+		return err
+	} else {
+		fmt.Println("Cloak installed successfully")
+	}
+
+	return os.Chmod(cloakSystemPath, 0667)
+}
+
+func startWatcher(ctx context.Context) error {
+	fmt.Println("Starting cloak")
+	watcher, err := fsnotify.NewWatcher()
+
+	if err != nil {
+		return err
+	}
+
+	defer watcher.Close()
+
+	if err := watcher.Add("./config.yml"); err != nil {
+		return err
+	}
+
+	cctx, cancel := context.WithCancel(ctx)
+
+	defer cancel()
+
+	if err := startCloak(cctx); err != nil {
+		return err
+	}
+
+	for {
+		select {
+		case event := <-watcher.Events:
+			fmt.Println(event)
+			if event.Op.Has(fsnotify.Write) {
+				time.Sleep(time.Second)
+				cancel()
+				cctx, cancel = context.WithCancel(ctx)
+
+				if err := startCloak(cctx); err != nil {
+					return err
+				}
+			}
+		case err := <-watcher.Errors:
+			fmt.Println(err)
+		}
+	}
+}
+
+func startCloak(ctx context.Context) error {
+	config, err := prepareConfig()
+
+	if err != nil {
+		return err
+	}
+
+	for k, c := range config.Clients {
+		fName := fmt.Sprintf(".config-%s.json", k)
+		logFName := fmt.Sprintf(".log-%s.log", k)
+
+		if err := os.WriteFile(fName, []byte(c.Config), 0666); err != nil {
+			return err
+		}
+
+		file, err := os.Create(logFName)
+
+		if err != nil {
+			return err
+		}
+
+		go func() {
+			<-ctx.Done()
+			file.Close()
+		}()
+
+		cmd := exec.CommandContext(ctx, getCloak(), "-c", fName, "-s", c.Server, "-p", strconv.Itoa(c.Port), "-l", strconv.Itoa(c.Listen))
+
+		cmd.Stdout = file
+		cmd.Stderr = file
+
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+
+		fmt.Printf("Started config %s\n", fName)
+	}
+
+	return nil
+}
+
+func prepareConfig() (*Config, error) {
+	fmt.Println("Config file changed. refreshing.")
+
+	// Read the config
+	file, err := os.Open("config.yml")
+
+	if err != nil {
+		fmt.Printf("Failed to open config.yml %v", err)
+		return nil, err
+	}
+
+	arr, _ := io.ReadAll(file)
+
+	config := &Config{}
+
+	if err := yaml.Unmarshal(arr, &config); err != nil {
+		fmt.Printf("Failed to open config.yml %v", err)
+		return nil, err
+	}
+
+	fmt.Println(config)
+	return config, nil
+}
+
+func downloadFile(filepath string, url string) error {
+	// Create the file
+	out, err := os.Create(filepath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	// Get the data
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// Check server response
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+
+	// Writer the body to file
+	_, err = io.Copy(out, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func dieOnError(reason string, err error) {
+	if err != nil {
+		fmt.Printf("%s %s", reason, err)
+		panic(err)
+	}
+}
