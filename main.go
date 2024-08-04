@@ -155,7 +155,7 @@ func startWatcher(ctx context.Context) error {
 }
 
 func startCloak(ctx context.Context, configRoot string) (func(), error) {
-	config, err := prepareConfig()
+	config, err := prepareConfig(configRoot)
 
 	if err != nil {
 		return nil, err
@@ -210,11 +210,11 @@ func startCloak(ctx context.Context, configRoot string) (func(), error) {
 	}, nil
 }
 
-func prepareConfig() (*Config, error) {
+func prepareConfig(configRoot string) (*Config, error) {
 	fmt.Println("Config file changed. refreshing.")
 
 	// Read the config
-	file, err := os.Open("config.yml")
+	file, err := os.Open(filepath.Join(configRoot, "config.yml"))
 
 	if err != nil {
 		fmt.Printf("Failed to open config.yml %v", err)
